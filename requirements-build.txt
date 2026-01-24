@@ -1,0 +1,4 @@
+# Build-time dependencies for creating the Windows .exe and installer.
+# Install with: pip install -r requirements.txt -r requirements-build.txt
+
+pyinstaller>=6.0.0

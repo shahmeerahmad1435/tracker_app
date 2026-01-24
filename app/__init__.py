@@ -1,0 +1,1 @@
+"""Attendance tracking application package."""
