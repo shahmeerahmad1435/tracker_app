@@ -3,7 +3,7 @@
 # Run on Windows: pyinstaller AttendanceTracker.spec
 
 from PyInstaller.utils.hooks import collect_all
-from PyInstaller.building.build import Analysis, EXE, PYZ
+# Analysis, EXE, PYZ are provided as globals by PyInstaller when it runs the spec
 
 # PySide6: collect plugins (e.g. platforms/qwindows.dll) and data
 pyside_datas, pyside_binaries, pyside_hidden = collect_all('PySide6')
