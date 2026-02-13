@@ -78,6 +78,11 @@ The application expects the following REST API endpoints:
 - **Logout button**: Returns to login screen and clears session
 - Application continues running in background when minimized
 
+## Resilience
+
+- **Foreground / background**: The app keeps running whether in the foreground or minimized; closing the window only minimizes it.
+- **Internet disconnect / reconnect**: If the connection is lost, background API calls (idle report, screenshots, force break, dashboard sync) fail safely and are retried on the next timer tick. When the connection is restored, the next scheduled call succeeds; the app does not need to be restarted.
+
 ## Project Structure
 
 ```

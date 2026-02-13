@@ -1,9 +1,15 @@
 """
 Main application entry point.
 Wires together all components: UI, state management, API client, and background services.
+
+Design: The app keeps running whether in foreground or background (minimize = hide, not quit).
+On internet disconnect, background API calls (idle report, screenshot, force break, dashboard
+poll) fail safely and are retried on the next timer tick. When internet reconnects, the next
+scheduled call succeeds; no special reconnect logic required.
 """
 import sys
 from datetime import datetime
+from typing import Optional
 from PySide6.QtWidgets import QApplication, QStackedWidget, QMessageBox
 from PySide6.QtCore import QTimer, Qt, QEvent
 from PySide6.QtGui import QCloseEvent
@@ -22,6 +28,7 @@ from .state_manager import StateManager, AppState
 from .activity_listener import ActivityListener
 from .idle_tracker import IdleTracker
 from .screenshot_service import ScreenshotService
+from .usage_tracker import UsageTracker
 from .ui.login_window import LoginWindow
 from .ui.dashboard_window import DashboardWindow
 
@@ -55,6 +62,7 @@ class AttendanceApp:
             self.state_manager,
             self.api_client
         )
+        self.usage_tracker = UsageTracker(self.state_manager, self.api_client)
         
         # UI components
         self.stacked_widget = MinimizableStackedWidget()
@@ -65,10 +73,13 @@ class AttendanceApp:
         self.stacked_widget.addWidget(self.dashboard_window)
         self.stacked_widget.setCurrentWidget(self.login_window)
         
-        # Force break timer
+        # Force break: enter (idle for N min) and exit (only on real mouse/keyboard via activity_detected signal)
         self._force_break_timer = QTimer()
         self._force_break_timer.timeout.connect(self._check_force_break)
-        self._force_break_timer.start(5000)  # Check every 5 seconds
+        self._force_break_timer.start(5000)  # Every 5s: dashboard sync + maybe enter force break
+        
+        self._keep_alive_timer = QTimer()
+        self._keep_alive_timer.timeout.connect(self._send_keep_alive)
         
         # Wire up signals
         self._connect_signals()
@@ -92,8 +103,11 @@ class AttendanceApp:
         self.state_manager.state_changed.connect(self._on_state_changed)
         self.state_manager.user_data_changed.connect(self._on_user_data_changed)
         
-        # Activity listener (for resuming from force break)
-        self.activity_listener.activity_detected.connect(self._on_activity_detected)
+        # Activity listener (for resuming from force break). QueuedConnection so slot runs in main thread
+        # when signal is emitted from pynput's listener thread (mouse/keyboard).
+        self.activity_listener.activity_detected.connect(
+            self._on_activity_detected, Qt.ConnectionType.QueuedConnection
+        )
     
     def _handle_login(self, email: str, password: str, remember_me: bool):
         """Handle login request."""
@@ -142,6 +156,7 @@ class AttendanceApp:
                 print(f"Warning: Could not fetch dashboard stats: {e}")
             finally:
                 self.dashboard_window.set_actions_loading(False)
+            self._keep_alive_timer.start(60_000)  # POST /staff/keep-alive every 1 minute after login
             
         except Exception as e:
             self.login_window.show_error(str(e))
@@ -189,17 +204,19 @@ class AttendanceApp:
             self.state_manager.set_check_out()
             self.dashboard_window.set_was_checked_in(True)
             self.dashboard_window.reset_timer()
+            self.dashboard_window.set_today_attendance(None)
             self._refresh_dashboard_state()
             return
 
         if not is_checked_in:
-            # Never checked in today (neutral)
             self.dashboard_window.set_was_checked_in(False)
             self.dashboard_window.reset_timer()
+            self.dashboard_window.set_today_attendance(None)
             self._refresh_dashboard_state()
             return
 
-        # is_checked_in True
+        # is_checked_in True: pass today_attendance so dashboard can compute work time = elapsed - breaks
+        self.dashboard_window.set_today_attendance(today_attendance or {})
         check_in_iso = today_attendance.get("check_in") if today_attendance else None
         late_by_sec = today_attendance.get("late_by") if today_attendance else None
         late_by_minutes = (
@@ -252,6 +269,7 @@ class AttendanceApp:
                 break_start_timestamp=break_start_timestamp,
             )
             self._refresh_dashboard_state()
+            self._ensure_usage_tracker_from_policy()
             return
 
         # Checked in, not on break
@@ -262,6 +280,25 @@ class AttendanceApp:
             break_start_timestamp=None,
         )
         self._refresh_dashboard_state()
+        self._ensure_usage_tracker_from_policy()
+    
+    def _ensure_usage_tracker_from_policy(self):
+        """Start/stop usage tracker based on usage_policy_enabled when checked in (e.g. after dashboard sync)."""
+        if self.state_manager.state != AppState.CHECKED_IN:
+            return
+        if self.state_manager.usage_policy_enabled:
+            self.usage_tracker.start()
+        else:
+            self.usage_tracker.stop()
+    
+    def _send_keep_alive(self):
+        """POST /staff/keep-alive every 1 minute while logged in."""
+        if not self.api_client.session_token:
+            return
+        try:
+            self.api_client.keep_alive()
+        except Exception as e:
+            print(f"Keep-alive failed: {e}")
     
     def _handle_logout(self):
         """Handle logout request."""
@@ -269,6 +306,8 @@ class AttendanceApp:
             # Stop all services
             self.idle_tracker.stop()
             self.screenshot_service.stop()
+            self.usage_tracker.stop()
+            self._keep_alive_timer.stop()
             
             # Logout from API (may fail if already logged out, but that's okay)
             try:
@@ -389,29 +428,30 @@ class AttendanceApp:
         
         # Manage background services based on state
         if new_state == AppState.CHECKED_IN:
-            # Start idle tracking
             self.idle_tracker.start()
-            
-            # Start screenshots if allowed
             if self.state_manager.allow_screenshot:
                 self.screenshot_service.start()
             else:
                 self.screenshot_service.stop()
+            if self.state_manager.usage_policy_enabled:
+                self.usage_tracker.start()
+            else:
+                self.usage_tracker.stop()
         
         elif new_state == AppState.ON_BREAK:
-            # Stop services
             self.idle_tracker.stop()
             self.screenshot_service.stop()
+            self.usage_tracker.stop()
         
         elif new_state == AppState.FORCE_BREAK:
-            # Stop services
             self.idle_tracker.stop()
             self.screenshot_service.stop()
+            self.usage_tracker.stop()
         
         elif new_state == AppState.LOGGED_OUT:
-            # Stop all services
             self.idle_tracker.stop()
             self.screenshot_service.stop()
+            self.usage_tracker.stop()
     
     def _on_user_data_changed(self, user_data: dict):
         """Handle user data change."""
@@ -429,44 +469,49 @@ class AttendanceApp:
         )
     
     def _check_force_break(self):
-        """Every 5s: fetch /staff/dashboard/stats when on dashboard and logged in; then check force break."""
+        """Every 5s: fetch dashboard stats; maybe enter force break (when checked in and idle)."""
         if self.api_client.session_token and self.stacked_widget.currentWidget() == self.dashboard_window:
             try:
                 self._fetch_and_sync_dashboard()
             except Exception as e:
                 print(f"Dashboard stats poll: {e}")
 
-        # Only check force break when checked in
         if self.state_manager.state != AppState.CHECKED_IN:
             return
 
-        # Calculate idle time
-        last_activity = self.activity_listener.get_last_activity_time()
-        now = datetime.now()
-        idle_seconds = int((now - last_activity).total_seconds())
-        
-        # Check if force break threshold reached
-        force_break_time = self.state_manager.force_break_time
-        if idle_seconds >= force_break_time:
+        seconds_since_activity = self.activity_listener.get_seconds_since_last_activity()
+        force_break_seconds = self.state_manager.force_break_time
+        if seconds_since_activity >= force_break_seconds:
             try:
-                # Trigger force break
                 self.api_client.force_break_start()
                 break_start_time = datetime.now().strftime("%H:%M")
                 self.state_manager.set_break_start(break_start_time, is_force=True)
-                # Freeze timer on force break too
                 self.dashboard_window.set_break_freeze(datetime.now())
             except Exception as e:
                 print(f"Failed to trigger force break: {e}")
-    
+
+    def _end_force_break_on_activity(self):
+        """End force break and hit end-break API. Only called when user actually moves mouse or presses keyboard (activity_detected signal)."""
+        if self.state_manager.state != AppState.FORCE_BREAK:
+            return
+        self.state_manager.set_break_end()
+        self.dashboard_window.update_state(
+            self.state_manager.state,
+            self.state_manager.check_in_time,
+            self.state_manager.break_start_time,
+            self.state_manager.late_by_minutes,
+        )
+        try:
+            self.api_client.end_break()
+            self._fetch_and_sync_dashboard()
+        except Exception as e:
+            print(f"Failed to notify server of end force break: {e}")
+
     def _on_activity_detected(self):
-        """Handle activity detection (for resuming from force break)."""
-        # If in force break, end it on any activity
-        if self.state_manager.state == AppState.FORCE_BREAK:
-            try:
-                self.api_client.end_break()
-                self.state_manager.set_break_end()
-            except Exception as e:
-                print(f"Failed to end force break: {e}")
+        """When user moves mouse or presses any keyboard key during force break → hit end-break API immediately."""
+        if self.state_manager.state != AppState.FORCE_BREAK:
+            return
+        self._end_force_break_on_activity()
     
     def run(self):
         """Run the application."""

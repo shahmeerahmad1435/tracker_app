@@ -44,8 +44,9 @@ class DashboardWindow(QWidget):
         self._timer = QTimer()
         self._timer.timeout.connect(self._update_time)
         self._timer.start(1000)  # Update every second
-        self._check_in_timestamp = None  # Store check-in datetime
-        self._break_start_timestamp = None  # When set, timer is frozen (on break): shows (break_start - check_in)
+        self._check_in_timestamp = None
+        self._break_start_timestamp = None  # When set, timer is frozen (on break)
+        self._today_attendance_breaks = None  # List of (start_dt, end_dt) for work time = elapsed - breaks
         self._drag_position = QPoint()
         self._was_checked_in = False  # Track if user was previously checked in
         
@@ -494,31 +495,73 @@ class DashboardWindow(QWidget):
         return self._load_svg_icon(icon_type, color, size)
     
     def _update_time(self):
-        """Update elapsed time display based on check-in and break state.
-        - checked_out: 00:00:00
-        - checked_in, not on break: (now - check_in) — running, HH:MM:SS
-        - on break: (break_start - check_in) — frozen, does not increment
-        """
+        """Show work time = (check_in to now or break_start) minus all break durations (HH:MM:SS)."""
         try:
             if self._check_in_timestamp is None:
                 self.time_label.setText("00:00:00")
                 return
             
+            now = datetime.now()
             if self._break_start_timestamp is not None:
-                # On break: show elapsed time up to when break started (frozen)
-                elapsed = self._break_start_timestamp - self._check_in_timestamp
+                end_dt = self._break_start_timestamp  # Frozen on break
             else:
-                # Checked in, not on break: (now - check_in)
-                elapsed = datetime.now() - self._check_in_timestamp
+                end_dt = now
             
-            total_seconds = max(0, int(elapsed.total_seconds()))
-            hours = total_seconds // 3600
-            minutes = (total_seconds % 3600) // 60
-            seconds = total_seconds % 60
+            elapsed_seconds = (end_dt - self._check_in_timestamp).total_seconds()
+            break_seconds = self._total_break_seconds(end_dt)
+            work_seconds = max(0, int(elapsed_seconds - break_seconds))
+            
+            hours = work_seconds // 3600
+            minutes = (work_seconds % 3600) // 60
+            seconds = work_seconds % 60
             self.time_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
         except Exception as e:
             print(f"Timer error: {e}")
             self.time_label.setText("00:00:00")
+    
+    def _total_break_seconds(self, as_of_dt: datetime) -> float:
+        """Total break duration in seconds up to as_of_dt. Uses today_attendance breaks (start_time, end_time)."""
+        if not self._today_attendance_breaks:
+            return 0.0
+        total = 0.0
+        for start_dt, end_dt in self._today_attendance_breaks:
+            if end_dt is not None:
+                if end_dt <= as_of_dt:
+                    total += (end_dt - start_dt).total_seconds()
+            else:
+                # Current/open break: duration from start to as_of_dt
+                if start_dt < as_of_dt:
+                    total += (as_of_dt - start_dt).total_seconds()
+        return total
+    
+    def set_today_attendance(self, today_attendance: dict):
+        """Set today_attendance from API; parse breaks into (start_dt, end_dt) for work time calculation."""
+        self._today_attendance_breaks = None
+        if not today_attendance:
+            return
+        breaks_raw = today_attendance.get("breaks") or []
+        parsed = []
+        for b in breaks_raw:
+            if not isinstance(b, dict):
+                continue
+            start_iso = b.get("start_time") or b.get("start")
+            if not start_iso:
+                continue
+            try:
+                start_dt = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
+                start_dt = _to_local_naive(start_dt)
+            except Exception:
+                continue
+            end_iso = b.get("end_time") or b.get("end")
+            end_dt = None
+            if end_iso:
+                try:
+                    end_dt = datetime.fromisoformat(str(end_iso).replace("Z", "+00:00"))
+                    end_dt = _to_local_naive(end_dt)
+                except Exception:
+                    pass
+            parsed.append((start_dt, end_dt))
+        self._today_attendance_breaks = parsed
     
     def set_check_in_time(self, check_in_time_str: str = None, check_in_timestamp: datetime = None,
                           break_start_timestamp: datetime = None):

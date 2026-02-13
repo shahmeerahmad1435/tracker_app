@@ -68,7 +68,7 @@ class APIClient:
         except requests.exceptions.RequestException as e:
             raise Exception(str(e))
     
-    def _post(self, endpoint: str, data: Optional[Dict] = None) -> Dict[str, Any]:
+    def _post(self, endpoint: str, data: Optional[Dict] = None, timeout: int = 10) -> Dict[str, Any]:
         """Make a POST request."""
         url = f"{self.base_url}{endpoint}"
         headers = self._headers()
@@ -84,7 +84,7 @@ class APIClient:
                 url,
                 json=data,
                 headers=headers,
-                timeout=10
+                timeout=timeout
             )
             
             # Debug response
@@ -137,6 +137,13 @@ class APIClient:
         Returns: {status, ...}
         """
         return self._post("/staff/break/end")
+
+    def keep_alive(self) -> Dict[str, Any]:
+        """
+        POST /staff/keep-alive
+        Called every 1 minute after login to keep session alive.
+        """
+        return self._post("/staff/keep-alive")
     
     def force_break_start(self) -> Dict[str, Any]:
         """
@@ -148,29 +155,38 @@ class APIClient:
     def report_idle(self, idle_seconds: int) -> Dict[str, Any]:
         """
         POST /desktop/idle/report
-        Body: {idle_seconds: int, timestamp: str (ISO format)}
-        Returns: {status, ...}
+        Body: {idle_seconds: int (duration in seconds), timestamp: str (ISO format)}
+        Company rules idle1_time / idle2_time / idle3_time are in minutes; this API expects seconds.
         """
         timestamp = datetime.utcnow().isoformat() + "Z"
         data = {
-            "idle_seconds": idle_seconds,
+            "idle_seconds": int(idle_seconds),  # always in seconds (e.g. 1800 = 30 min)
             "timestamp": timestamp
         }
         return self._post("/desktop/idle/report", data)
+
+    def report_usage(self, entries: list) -> Dict[str, Any]:
+        """
+        POST /desktop/usage/report
+        Body: { "entries": [ {"app_name": str, "duration_seconds": int, "site_url": str (optional)} ] }
+        """
+        data = {"entries": entries}
+        return self._post("/desktop/usage/report", data)
     
     def upload_screenshot(self, screenshot_base64: str) -> Dict[str, Any]:
         """
         POST /desktop/screenshot/upload
         Body: {screenshot_base64: str, timestamp: str (ISO format)}
         Returns: {status, ...}
+        Uses longer timeout (60s) for large payload.
         """
         timestamp = datetime.utcnow().isoformat() + "Z"
         data = {
             "screenshot_base64": screenshot_base64,
-             "screen_status": "active",
+            "screen_status": "active",
             "timestamp": timestamp
         }
-        return self._post("/desktop/screenshot/upload", data)
+        return self._post("/desktop/screenshot/upload", data, timeout=60)
     
     def logout(self) -> Dict[str, Any]:
         """

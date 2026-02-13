@@ -3,7 +3,7 @@ Central state manager for the attendance tracking application.
 Manages application state and notifies observers of state changes.
 """
 from enum import Enum
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, List
 from PySide6.QtCore import QObject, Signal
 
 
@@ -81,6 +81,14 @@ class StateManager(QObject):
         return self._late_by_minutes
     
     @property
+    def usage_policy_enabled(self) -> bool:
+        """Whether to report app/website usage to POST /desktop/usage/report (from staff.usage_policy_enabled)."""
+        if self._staff_settings:
+            v = self._staff_settings.get("usage_policy_enabled", False)
+            return bool(v) if isinstance(v, bool) else (v == "yes" or v == True)
+        return False
+
+    @property
     def allow_screenshot(self) -> bool:
         """Check if screenshots are allowed."""
         if self._staff_settings:
@@ -93,15 +101,33 @@ class StateManager(QObject):
     
     @property
     def force_break_time(self) -> int:
-        """Get force break time in seconds."""
-        # force_break_time is in staff_settings, not company_rules
+        """Get force break time in seconds (API sends minutes)."""
         if self._staff_settings:
-            force_break_minutes = self._staff_settings.get("force_break_time", 5)  # Default 5 minutes
-            return int(force_break_minutes) * 60  # Convert minutes to seconds
+            force_break_minutes = self._staff_settings.get("force_break_time", 5)
+            return int(force_break_minutes) * 60  # minutes -> seconds
         return 300  # Default 5 minutes in seconds
+
+    @property
+    def screenshot_interval_seconds(self) -> int:
+        """Get screenshot interval in seconds (API sends minutes)."""
+        if self._staff_settings:
+            interval_minutes = self._staff_settings.get("screenshot_interval", 5)
+            return int(interval_minutes) * 60  # minutes -> seconds
+        return 300  # Default 5 minutes in seconds
+
+    @property
+    def idle_report_thresholds_seconds(self) -> List[int]:
+        """Idle report thresholds in seconds (company_rules idle1_time, idle2_time, idle3_time are in minutes). Report API at these thresholds only."""
+        defaults = (10, 30, 50)  # minutes
+        if self._company_rules:
+            t1 = self._company_rules.get("idle1_time", defaults[0])
+            t2 = self._company_rules.get("idle2_time", defaults[1])
+            t3 = self._company_rules.get("idle3_time", defaults[2])
+            return sorted([int(t1) * 60, int(t2) * 60, int(t3) * 60])
+        return [d * 60 for d in defaults]
     
     def set_login_data(self, session_token: str, staff_settings: Dict[str, Any], 
-                      company_rules: Dict[str, Any], user_name: str):
+                      company_rules: Dict[str, Any], user_name: str): 
         """Set login data after successful login."""
         self._session_token = session_token
         self._staff_settings = dict(staff_settings) if staff_settings else {}
@@ -120,7 +146,7 @@ class StateManager(QObject):
             return
         if self._staff_settings is None:
             self._staff_settings = {}
-        for k in ("force_break_time", "allow_screenshot", "shift_start", "shift_end", "timezone", "grace_period", "department"):
+        for k in ("force_break_time", "allow_screenshot", "screenshot_interval", "usage_policy_enabled", "shift_start", "shift_end", "timezone", "grace_period", "department"):
             if k in updates:
                 self._staff_settings[k] = updates[k]
     

@@ -5,14 +5,11 @@ import os
 
 # API Configuration
 # API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://workforce-hub-180.preview.emergentagent.com/api")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://trackly.net/api")
 
 # Application Settings
 APP_NAME = "Attendance Tracker"
 APP_VERSION = "1.0.0"
-
-# Screenshot Settings
-SCREENSHOT_INTERVAL_SECONDS = 10  # Default interval, can be overridden by API
 
 # Idle Tracking Settings
 IDLE_CHECK_INTERVAL_SECONDS = 5  # How often to check for idle time
